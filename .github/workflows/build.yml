@@ -22,11 +22,8 @@ jobs:
 
       - name: Build exe (with pygame bundled)
         run: |
-          pyinstaller --noconfirm --clean --onefile --windowed --name MacroDeck ^
-            --collect-all pygame ^
-            --collect-all customtkinter ^
-            --collect-submodules pynput ^
-            macro_app.py
+          pyinstaller --noconfirm --clean --onefile --windowed --name MacroDeck --collect-all pygame --collect-all customtkinter --collect-submodules pynput macro_app.py
+
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
