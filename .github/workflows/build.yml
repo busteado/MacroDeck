@@ -1,4 +1,4 @@
-name: Build Windows EXE (Macro Editor)
+name: Build Windows EXE (Macro Creator)
 
 on:
   workflow_dispatch:
@@ -21,13 +21,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install customtkinter pyinstaller
 
-      # Opción recomendada: crea una carpeta dist/MacroEditor/ con el exe y todo lo necesario
-      - name: Build (folder mode - recommended)
+      # Recomendado: modo carpeta (más estable que onefile)
+      - name: Build (folder mode)
         run: |
-          pyinstaller --noconfirm --clean --windowed --name MacroEditor --collect-all customtkinter macro_editor.py
+          pyinstaller --noconfirm --clean --windowed --name MacroCreator --collect-all customtkinter macro_editor.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MacroEditor-dist
-          path: dist/MacroEditor
+          name: MacroCreator-dist
+          path: dist/MacroCreator
