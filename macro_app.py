@@ -1,177 +1,243 @@
 import json
 import time
 import threading
+import socket
 from dataclasses import dataclass, asdict
-from typing import List, Optional, Dict, Callable, Tuple
+from typing import List, Optional, Dict, Callable, Tuple, Any
 
 import customtkinter as ctk
 import pygame
-from pynput import keyboard
 
 
 # ============================
-# Modelo de datos (GUÍAS)
+# Config conexión con tu juego
+# ============================
+UDP_HOST = "127.0.0.1"
+UDP_PORT = 28015  # cambia si quieres
+
+
+# ============================
+# Modelo de datos (MACRO INPUT)
 # ============================
 @dataclass
-class Step:
-    # type: note | wait | expect
-    type: str
-    text: Optional[str] = None
-    seconds: Optional[float] = None
-    expect: Optional[str] = None  # e.g. "A", "B", "X", "Y", "LB", "RB", "LT", "RT", "LS_UP", "LS_DOWN", "LS_DIAG"
+class MacroFrame:
+    dt_ms: int
+    inputs: Dict[str, Any]  # throttle/steer/pitch/yaw/roll/jump/boost/handbrake/airRollL/airRollR...
 
 
 @dataclass
-class Guide:
+class Macro:
     name: str
     type: str  # "Single-Stage" | "Multi-Stage"
     description: str
-    trigger: Optional[str] = None  # controller button name (A/B/...)
+    trigger: Optional[str] = None
     enabled: bool = True
-    steps: List[Step] = None
+    frames: List[MacroFrame] = None
 
 
 # ============================
-# Biblioteca por defecto
-# (son GUÍAS; NO automatizan)
+# Biblioteca por defecto (las de tu imagen)
+# Timings orientativos: ajusta a tu física/binds.
 # ============================
-def default_guides() -> List[Guide]:
+def default_macros() -> List[Macro]:
+    def F(dt, **inp):
+        return MacroFrame(dt_ms=int(dt), inputs=inp)
+
     return [
-        Guide(
+        Macro(
             name="Half Flip",
             type="Single-Stage",
-            description="Guía de timing y pasos para practicar half-flip.",
-            steps=[
-                Step("note", "Prepárate en línea recta."),
-                Step("wait", seconds=0.8),
-                Step("expect", text="Salta (A).", expect="A"),
-                Step("wait", seconds=0.18),
-                Step("expect", text="Backflip (stick abajo + salto).", expect="LS_DOWN"),
-                Step("wait", seconds=0.12),
-                Step("expect", text="Cancela el flip: stick ARRIBA rápido.", expect="LS_UP"),
-                Step("wait", seconds=0.25),
-                Step("note", "Air roll para enderezar y caer mirando atrás."),
+            description="Half-flip: salto, backflip, cancel, air roll para enderezar.",
+            frames=[
+                F(80, jump=True), F(40, jump=False),
+                F(60, pitch=1.0, jump=True), F(30, jump=False, pitch=1.0),
+                F(140, pitch=-1.0),
+                F(220, airRollL=True, pitch=-0.2),
+                F(100, airRollL=False, pitch=0.0),
             ],
         ),
-        Guide(
-            name="Speedflip",
+        Macro(
+            name="Musty (2-Stage)",
+            type="Multi-Stage",
+            description="Musty: pop + pitch back + flick (2 saltos).",
+            frames=[
+                F(70, jump=True), F(40, jump=False),
+                F(260, pitch=1.0),
+                F(70, jump=True, pitch=-1.0), F(40, jump=False, pitch=-1.0),
+                F(160, pitch=-0.2),
+            ],
+        ),
+        Macro(
+            name="Stall (Left side)",
             type="Single-Stage",
-            description="Guía de práctica (timing orientativo). Ajusta a tu sensación.",
-            steps=[
-                Step("note", "En Freeplay: acelera recto."),
-                Step("wait", seconds=0.45),
-                Step("expect", text="Salto 1 (A).", expect="A"),
-                Step("wait", seconds=0.07),
-                Step("expect", text="Salto 2 rápido (A) + stick DIAGONAL.", expect="LS_DIAG"),
-                Step("wait", seconds=0.18),
-                Step("note", "Corrige el giro (stick contrario/air roll si lo usas)."),
-                Step("wait", seconds=0.35),
-                Step("expect", text="Sigue acelerando (RT).", expect="RT"),
+            description="Stall izquierda (orientativo): yaw/roll + jump breve.",
+            frames=[
+                F(60, yaw=-1.0, roll=-1.0),
+                F(45, yaw=-1.0, roll=-1.0, jump=True),
+                F(35, jump=False, yaw=0.0, roll=0.0),
             ],
         ),
-        Guide(
-            name="Wavedash",
+        Macro(
+            name="Stall (Right side)",
             type="Single-Stage",
-            description="Guía para wavedash básico.",
-            steps=[
-                Step("note", "Busca una caída baja (tras pequeño salto)."),
-                Step("wait", seconds=0.6),
-                Step("expect", text="Salta (A) y suelta rápido.", expect="A"),
-                Step("wait", seconds=0.25),
-                Step("expect", text="Al tocar suelo: stick ADELANTE y salto (A).", expect="LS_UP"),
-                Step("wait", seconds=0.08),
-                Step("expect", text="Completa el dash con el salto (A).", expect="A"),
+            description="Stall derecha (orientativo): yaw/roll + jump breve.",
+            frames=[
+                F(60, yaw=1.0, roll=1.0),
+                F(45, yaw=1.0, roll=1.0, jump=True),
+                F(35, jump=False, yaw=0.0, roll=0.0),
             ],
         ),
-        Guide(
-            name="Stall (aerial)",
+        Macro(
+            name="Speed Flip Right",
             type="Single-Stage",
-            description="Guía para practicar stall (orientativo).",
-            steps=[
-                Step("note", "Inicia aerial (salto + boost si lo usas)."),
-                Step("wait", seconds=0.8),
-                Step("expect", text="Stick: IZQ o DER fuerte.", expect="LS_DIAG"),
-                Step("wait", seconds=0.05),
-                Step("expect", text="Pulsa salto (A) en el timing.", expect="A"),
-                Step("note", "Repite ajustando timing y dirección."),
+            description="Speedflip derecha: boost + salto + diagonal + cancel.",
+            frames=[
+                F(200, throttle=1.0, boost=True),
+                F(70, jump=True), F(40, jump=False),
+                F(65, jump=True, pitch=-1.0, yaw=0.55), F(35, jump=False, pitch=-1.0, yaw=0.55),
+                F(140, pitch=1.0, yaw=-0.15),
+                F(300, throttle=1.0, boost=True),
             ],
         ),
-        Guide(
+        Macro(
+            name="Speed Flip Left",
+            type="Single-Stage",
+            description="Speedflip izquierda: boost + salto + diagonal + cancel.",
+            frames=[
+                F(200, throttle=1.0, boost=True),
+                F(70, jump=True), F(40, jump=False),
+                F(65, jump=True, pitch=-1.0, yaw=-0.55), F(35, jump=False, pitch=-1.0, yaw=-0.55),
+                F(140, pitch=1.0, yaw=0.15),
+                F(300, throttle=1.0, boost=True),
+            ],
+        ),
+        Macro(
             name="Wall Dash Right",
             type="Single-Stage",
-            description="Guía para wall dash en pared (derecha) (orientativo).",
-            steps=[
-                Step("note", "Sube por pared con velocidad."),
-                Step("wait", seconds=0.7),
-                Step("expect", text="Salto pequeño (A) pegado a pared.", expect="A"),
-                Step("wait", seconds=0.12),
-                Step("expect", text="Repite saltos rítmicos (A) mientras mantienes dirección.", expect="A"),
-                Step("note", "Ajusta cámara/binds a tu gusto."),
+            description="Wall dash derecha (patrón). Repite si quieres más duración.",
+            frames=[
+                F(120, throttle=1.0, boost=True),
+                F(60, jump=True, steer=0.35), F(40, jump=False, steer=0.35),
+                F(90, steer=0.35, boost=True),
+                F(60, jump=True, steer=0.35), F(40, jump=False, steer=0.35),
             ],
         ),
-        Guide(
-            name="Musty Flick",
-            type="Multi-Stage",
-            description="Guía por etapas para practicar musty flick.",
-            steps=[
-                Step("note", "Stage 1: dribble estable (balón sobre el coche)."),
-                Step("wait", seconds=0.8),
-                Step("expect", text="Salto (A).", expect="A"),
-                Step("wait", seconds=0.22),
-                Step("expect", text="Levanta morro: stick ABAJO un instante.", expect="LS_DOWN"),
-                Step("wait", seconds=0.35),
-                Step("expect", text="Segundo salto (A) para flick.", expect="A"),
-                Step("wait", seconds=0.06),
-                Step("expect", text="Dirección del flick: stick ARRIBA.", expect="LS_UP"),
+        Macro(
+            name="Wall Dash Left",
+            type="Single-Stage",
+            description="Wall dash izquierda (patrón). Repite si quieres más duración.",
+            frames=[
+                F(120, throttle=1.0, boost=True),
+                F(60, jump=True, steer=-0.35), F(40, jump=False, steer=-0.35),
+                F(90, steer=-0.35, boost=True),
+                F(60, jump=True, steer=-0.35), F(40, jump=False, steer=-0.35),
             ],
         ),
-        Guide(
-            name="Breezi Flick (2-stage)",
+        Macro(
+            name="Wave Dash",
+            type="Single-Stage",
+            description="Wave dash: pequeño salto + dash al tocar suelo.",
+            frames=[
+                F(70, jump=True), F(50, jump=False),
+                F(170, pitch=-0.6),
+                F(55, pitch=-0.9, jump=True), F(40, jump=False, pitch=-0.3),
+            ],
+        ),
+        Macro(
+            name="Kuxir Pinch Setup",
+            type="Single-Stage",
+            description="Setup pinch: velocidad + salto + air roll para orientar.",
+            frames=[
+                F(160, throttle=1.0, boost=True),
+                F(70, jump=True), F(40, jump=False),
+                F(260, airRollR=True, yaw=0.35, pitch=-0.25),
+                F(120, airRollR=False),
+            ],
+        ),
+        Macro(
+            name="Breezi Flick (2-Stage)",
             type="Multi-Stage",
-            description="Guía por etapas (simplificada) para practicar breezi.",
-            steps=[
-                Step("note", "Stage 1: dribble estable."),
-                Step("wait", seconds=0.7),
-                Step("expect", text="Salto (A).", expect="A"),
-                Step("wait", seconds=0.25),
-                Step("note", "Stage 1: rotación/air roll si lo usas (a tu estilo)."),
-                Step("wait", seconds=0.55),
-                Step("expect", text="Stage 2: segundo salto (A) para flick.", expect="A"),
-                Step("wait", seconds=0.08),
-                Step("expect", text="Stage 2: empuja stick en dirección del flick.", expect="LS_DIAG"),
+            description="Breezi simplificado: pop + rotación + flick.",
+            frames=[
+                F(70, jump=True), F(40, jump=False),
+                F(420, airRollL=True, yaw=-0.55, pitch=0.35),
+                F(70, jump=True, pitch=-1.0), F(40, jump=False, pitch=-1.0),
+                F(140, pitch=-0.35),
+            ],
+        ),
+        Macro(
+            name="Mawkzy Flick (2-Stage)",
+            type="Multi-Stage",
+            description="Mawkzy (base): pop + micro ajuste + flick rápido.",
+            frames=[
+                F(70, jump=True), F(40, jump=False),
+                F(180, pitch=0.55),
+                F(120, pitch=0.0, yaw=0.25),
+                F(70, jump=True, pitch=-1.0, yaw=0.25), F(40, jump=False, pitch=-1.0, yaw=0.25),
+                F(150, pitch=-0.25),
             ],
         ),
     ]
 
 
 # ============================
+# Persistencia
+# ============================
+def save_macros(path: str, macros: List[Macro]):
+    payload = []
+    for m in macros:
+        payload.append({
+            "name": m.name,
+            "type": m.type,
+            "description": m.description,
+            "trigger": m.trigger,
+            "enabled": m.enabled,
+            "frames": [asdict(f) for f in (m.frames or [])],
+        })
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+
+def load_macros(path: str) -> List[Macro]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        out: List[Macro] = []
+        for item in payload:
+            frames = [MacroFrame(**fr) for fr in item.get("frames", [])]
+            out.append(Macro(
+                name=item.get("name", "Macro"),
+                type=item.get("type", "Single-Stage"),
+                description=item.get("description", ""),
+                trigger=item.get("trigger"),
+                enabled=bool(item.get("enabled", True)),
+                frames=frames,
+            ))
+        return out
+    except FileNotFoundError:
+        return []
+    except Exception:
+        return []
+
+
+# ============================
 # Lectura de mando (pygame)
 # ============================
 class GamepadReader:
-    """
-    Lee mando con pygame. NO envía inputs.
-    Devuelve:
-      - botones pulsados (set[str])
-      - ejes (lx, ly)
-    """
     def __init__(self):
         self.ready = False
         self.joy: Optional[pygame.joystick.Joystick] = None
         self._lock = threading.Lock()
         self._buttons: set[str] = set()
-        self._axes: Tuple[float, float] = (0.0, 0.0)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
-        # Mapping “Xbox-like” típico en Windows
         self.btn_map: Dict[str, int] = {
             "A": 0, "B": 1, "X": 2, "Y": 3,
             "LB": 4, "RB": 5,
             "BACK": 6, "START": 7,
             "LSTICK": 8, "RSTICK": 9,
         }
-
-        # Triggers: heurística (axes) — varía por mando/driver
         self.trigger_threshold = 0.55
 
     def start(self):
@@ -180,7 +246,6 @@ class GamepadReader:
         if pygame.joystick.get_count() <= 0:
             self.ready = False
             return
-
         self.joy = pygame.joystick.Joystick(0)
         self.joy.init()
         self.ready = True
@@ -189,12 +254,9 @@ class GamepadReader:
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
-    def stop(self):
-        self._stop.set()
-
-    def snapshot(self) -> Tuple[set[str], Tuple[float, float]]:
+    def snapshot(self) -> set[str]:
         with self._lock:
-            return set(self._buttons), self._axes
+            return set(self._buttons)
 
     def _loop(self):
         while not self._stop.is_set():
@@ -205,7 +267,6 @@ class GamepadReader:
 
             buttons = set()
 
-            # botones
             for name, idx in self.btn_map.items():
                 try:
                     if self.joy.get_button(idx):
@@ -213,14 +274,7 @@ class GamepadReader:
                 except Exception:
                     pass
 
-            # sticks (0,1 suelen ser LS)
-            try:
-                lx = float(self.joy.get_axis(0))
-                ly = float(self.joy.get_axis(1))
-            except Exception:
-                lx, ly = 0.0, 0.0
-
-            # triggers por ejes típicos
+            # triggers por ejes (heurística)
             rt = False
             lt = False
             for ax in [2, 3, 4, 5]:
@@ -239,75 +293,21 @@ class GamepadReader:
 
             with self._lock:
                 self._buttons = buttons
-                self._axes = (lx, ly)
 
             time.sleep(0.02)
 
-    @staticmethod
-    def match_expect(expect: str, buttons: set[str], axes: Tuple[float, float]) -> bool:
-        lx, ly = axes
-        # Nota: en pygame, arriba suele ser ly negativo
-        if expect in buttons:
-            return True
-        if expect == "LS_UP":
-            return ly < -0.6
-        if expect == "LS_DOWN":
-            return ly > 0.6
-        if expect == "LS_DIAG":
-            return abs(lx) > 0.55 and abs(ly) > 0.55
-        return False
-
 
 # ============================
-# Persistencia
+# Engine: envía frames a tu juego por UDP
 # ============================
-def save_guides(path: str, guides: List[Guide]):
-    payload = []
-    for g in guides:
-        payload.append({
-            "name": g.name,
-            "type": g.type,
-            "description": g.description,
-            "trigger": g.trigger,
-            "enabled": g.enabled,
-            "steps": [asdict(s) for s in (g.steps or [])],
-        })
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, ensure_ascii=False)
-
-
-def load_guides(path: str) -> List[Guide]:
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            payload = json.load(f)
-        out: List[Guide] = []
-        for item in payload:
-            steps = [Step(**s) for s in item.get("steps", [])]
-            out.append(Guide(
-                name=item.get("name", "Guide"),
-                type=item.get("type", "Single-Stage"),
-                description=item.get("description", ""),
-                trigger=item.get("trigger"),
-                enabled=bool(item.get("enabled", True)),
-                steps=steps,
-            ))
-        return out
-    except FileNotFoundError:
-        return []
-    except Exception:
-        return []
-
-
-# ============================
-# Motor Trainer (guía + validación)
-# ============================
-class TrainerEngine:
-    def __init__(self, gamepad: GamepadReader, status_cb: Callable[[str], None]):
-        self.gamepad = gamepad
+class MacroNetEngine:
+    def __init__(self, status_cb: Callable[[str], None], host: str, port: int):
         self.status_cb = status_cb
+        self.host = host
+        self.port = port
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        self.tolerance = 0.35  # ventana para validar (segundos)
 
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
@@ -315,54 +315,49 @@ class TrainerEngine:
     def stop(self):
         self._stop.set()
 
-    def run(self, guide: Guide):
+    def run(self, macro: Macro):
         if self.is_running():
             return
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run_blocking, args=(guide,), daemon=True)
+        self._thread = threading.Thread(target=self._run_blocking, args=(macro,), daemon=True)
         self._thread.start()
 
-    def _run_blocking(self, guide: Guide):
-        self.status_cb(f"▶ Iniciando: {guide.name}")
-        for step in (guide.steps or []):
+    def _send(self, payload: dict):
+        try:
+            data = json.dumps(payload).encode("utf-8")
+            self._sock.sendto(data, (self.host, self.port))
+        except Exception:
+            pass
+
+    def _run_blocking(self, macro: Macro):
+        self.status_cb(f"▶ Macro: {macro.name} → UDP {self.host}:{self.port}")
+
+        # start
+        self._send({"type": "macro_start", "name": macro.name, "t": time.time()})
+
+        for fr in (macro.frames or []):
             if self._stop.is_set():
-                self.status_cb("⏹ Stop.")
-                return
+                break
 
-            if step.type == "note":
-                self.status_cb(f"ℹ {step.text or ''}")
-                time.sleep(0.65)
-                continue
+            # manda input frame
+            self._send({
+                "type": "macro_frame",
+                "name": macro.name,
+                "dt_ms": fr.dt_ms,
+                "inputs": fr.inputs,
+                "t": time.time()
+            })
 
-            if step.type == "wait":
-                time.sleep(float(step.seconds or 0))
-                continue
+            time.sleep(max(0.0, fr.dt_ms / 1000.0))
 
-            if step.type == "expect":
-                # mostramos instrucción y damos una ventana para validar
-                msg = step.text or "Acción"
-                self.status_cb(f"👉 {msg}")
-                ok = self._wait_for_expect(step.expect)
-                if step.expect:
-                    self.status_cb(("✅ OK" if ok else "⚠ No detectado") + f" · {step.expect}")
-                time.sleep(0.18)
+        # end + reset (inputs neutros)
+        self._send({"type": "macro_end", "name": macro.name, "t": time.time()})
+        self._send({"type": "macro_reset", "inputs": {
+            "throttle": 0.0, "steer": 0.0, "pitch": 0.0, "yaw": 0.0, "roll": 0.0,
+            "jump": False, "boost": False, "handbrake": False, "airRollL": False, "airRollR": False
+        }, "t": time.time()})
 
-        self.status_cb(f"🏁 Fin: {guide.name}")
-
-    def _wait_for_expect(self, expect: Optional[str]) -> bool:
-        if not expect:
-            time.sleep(self.tolerance)
-            return True
-
-        t0 = time.time()
-        while time.time() - t0 < self.tolerance:
-            if self._stop.is_set():
-                return False
-            buttons, axes = self.gamepad.snapshot()
-            if GamepadReader.match_expect(expect, buttons, axes):
-                return True
-            time.sleep(0.01)
-        return False
+        self.status_cb("✅ Fin." if not self._stop.is_set() else "⏹ Stop.")
 
 
 # ============================
@@ -371,48 +366,42 @@ class TrainerEngine:
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
-
 TRIGGERS = ["—", "A", "B", "X", "Y", "LB", "RB", "LT", "RT", "START", "BACK", "LSTICK", "RSTICK"]
 
 
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("MacroDeck — Trainer (mando)")
-        self.geometry("1020x620")
-        self.minsize(940, 560)
+        self.title("MacroDeck — Connected to Your Game (UDP)")
+        self.geometry("1040x640")
+        self.minsize(960, 580)
 
         self.data_path = "macros.json"
-        self.guides: List[Guide] = load_guides(self.data_path) or default_guides()
+        self.macros: List[Macro] = load_macros(self.data_path) or default_macros()
 
         self.gamepad = GamepadReader()
         self.gamepad.start()
 
-        self.listening_enabled = True
-        self.auto_start_listening = True
+        self.engine = MacroNetEngine(self._set_status_threadsafe, UDP_HOST, UDP_PORT)
 
-        self._last_back_press = 0.0
-
-        self.engine = TrainerEngine(self.gamepad, self._set_status_threadsafe)
+        self.auto_start = True
+        self.listening = True
+        self._last_back_time = 0.0
+        self._last_buttons = set()
 
         self.selected_index: Optional[int] = None
 
-        self._hotkey_listener = None
-        self._start_keyboard_listener()
-
         self._build_ui()
         self._refresh_list()
-        self._load_into_editor(0 if self.guides else None)
+        self._load_into_editor(0 if self.macros else None)
 
-        self.after(80, self._poll_gamepad_triggers)
+        self.after(60, self._poll_gamepad)
 
-    # ---------- UI ----------
     def _build_ui(self):
         self.grid_columnconfigure(0, weight=0)
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        # Left
         left = ctk.CTkFrame(self, corner_radius=16)
         left.grid(row=0, column=0, padx=14, pady=14, sticky="nsw")
         left.grid_rowconfigure(3, weight=1)
@@ -425,26 +414,24 @@ class App(ctk.CTk):
         topbar.grid(row=1, column=0, padx=14, pady=(0, 10), sticky="ew")
         topbar.grid_columnconfigure((0, 1), weight=1)
 
-        self.toggle_autostart = ctk.CTkSwitch(
-            topbar, text="Auto-Start Listening", command=self._on_toggle_autostart
-        )
+        self.toggle_autostart = ctk.CTkSwitch(topbar, text="Auto-Start Listening", command=self._on_toggle_autostart)
         self.toggle_autostart.select()
         self.toggle_autostart.grid(row=0, column=0, sticky="w")
 
         self.badge_listen = ctk.CTkLabel(topbar, text="Listening: ON", corner_radius=8)
         self.badge_listen.grid(row=0, column=1, sticky="e")
 
-        self.pad_status = ctk.CTkLabel(left, text="Mando: detectando…", corner_radius=8)
+        self.pad_status = ctk.CTkLabel(left, text=f"UDP → {UDP_HOST}:{UDP_PORT} · Mando: detectando…", corner_radius=8)
         self.pad_status.grid(row=2, column=0, padx=14, pady=(0, 10), sticky="ew")
 
-        self.listbox = ctk.CTkScrollableFrame(left, width=320, corner_radius=16)
+        self.listbox = ctk.CTkScrollableFrame(left, width=340, corner_radius=16)
         self.listbox.grid(row=3, column=0, padx=14, pady=(0, 14), sticky="nsew")
 
         # Right
         right = ctk.CTkFrame(self, corner_radius=16)
         right.grid(row=0, column=1, padx=(0, 14), pady=14, sticky="nsew")
         right.grid_columnconfigure(0, weight=1)
-        right.grid_rowconfigure(4, weight=1)
+        right.grid_rowconfigure(3, weight=1)
 
         self.lbl_title = ctk.CTkLabel(right, text="Editor", font=ctk.CTkFont(size=18, weight="bold"))
         self.lbl_title.grid(row=0, column=0, padx=18, pady=(16, 6), sticky="w")
@@ -454,7 +441,7 @@ class App(ctk.CTk):
         form.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(form, text="Nombre").grid(row=0, column=0, padx=12, pady=10, sticky="w")
-        self.entry_name = ctk.CTkEntry(form, placeholder_text="Nombre")
+        self.entry_name = ctk.CTkEntry(form)
         self.entry_name.grid(row=0, column=1, padx=12, pady=10, sticky="ew")
 
         ctk.CTkLabel(form, text="Tipo").grid(row=1, column=0, padx=12, pady=10, sticky="w")
@@ -468,53 +455,50 @@ class App(ctk.CTk):
         self.switch_enabled = ctk.CTkSwitch(form, text="Enabled")
         self.switch_enabled.grid(row=2, column=1, padx=12, pady=10, sticky="e")
 
-        ctk.CTkLabel(right, text="Pasos (guía):").grid(row=2, column=0, padx=18, pady=(0, 8), sticky="w")
         self.steps_frame = ctk.CTkScrollableFrame(right, corner_radius=16)
-        self.steps_frame.grid(row=3, column=0, padx=18, pady=(0, 10), sticky="nsew")
+        self.steps_frame.grid(row=2, column=0, padx=18, pady=(0, 10), sticky="nsew")
 
         actions = ctk.CTkFrame(right, corner_radius=14)
-        actions.grid(row=5, column=0, padx=18, pady=(0, 14), sticky="ew")
+        actions.grid(row=4, column=0, padx=18, pady=(0, 14), sticky="ew")
         actions.grid_columnconfigure((0, 1, 2), weight=1)
 
-        self.btn_save = ctk.CTkButton(actions, text="Guardar", command=self._save_current)
-        self.btn_save.grid(row=0, column=0, padx=(0, 10), pady=12, sticky="ew")
-
-        self.btn_run = ctk.CTkButton(actions, text="Start", command=self._run_current)
-        self.btn_run.grid(row=0, column=1, padx=10, pady=12, sticky="ew")
-
-        self.btn_stop = ctk.CTkButton(actions, text="Stop", fg_color="#B23B3B", hover_color="#8E2F2F",
-                                      command=self._stop_run)
-        self.btn_stop.grid(row=0, column=2, padx=(10, 0), pady=12, sticky="ew")
+        ctk.CTkButton(actions, text="Guardar", command=self._save_current).grid(
+            row=0, column=0, padx=(0, 10), pady=12, sticky="ew"
+        )
+        ctk.CTkButton(actions, text="Start", command=self._run_current).grid(
+            row=0, column=1, padx=10, pady=12, sticky="ew"
+        )
+        ctk.CTkButton(actions, text="Stop", fg_color="#B23B3B", hover_color="#8E2F2F", command=self._stop_run).grid(
+            row=0, column=2, padx=(10, 0), pady=12, sticky="ew"
+        )
 
         self.status = ctk.CTkLabel(right, text="Listo.", anchor="w")
-        self.status.grid(row=6, column=0, padx=18, pady=(0, 10), sticky="ew")
+        self.status.grid(row=5, column=0, padx=18, pady=(0, 10), sticky="ew")
 
         hint = ctk.CTkLabel(
             right,
-            text="Tip: Doble pulsación de BACK = activar/desactivar Listening.",
+            text="Doble BACK = toggle Listening. Auto-Start ejecuta macro al pulsar su Trigger.",
             text_color="#9AA4B2",
             anchor="w",
         )
-        hint.grid(row=7, column=0, padx=18, pady=(0, 12), sticky="ew")
+        hint.grid(row=6, column=0, padx=18, pady=(0, 12), sticky="ew")
 
-    # ---------- List ----------
     def _refresh_list(self):
         for w in self.listbox.winfo_children():
             w.destroy()
 
-        for idx, g in enumerate(self.guides):
-            trigger = g.trigger or "—"
-            enabled = "✓" if g.enabled else "✗"
+        for idx, m in enumerate(self.macros):
+            trigger = m.trigger or "—"
+            enabled = "✓" if m.enabled else "✗"
             btn = ctk.CTkButton(
                 self.listbox,
-                text=f"{enabled}  {g.name}\nType: {g.type}   Trigger: {trigger}",
+                text=f"{enabled}  {m.name}\nType: {m.type}   Trigger: {trigger}",
                 anchor="w",
                 height=58,
                 command=lambda i=idx: self._load_into_editor(i),
             )
             btn.pack(fill="x", padx=10, pady=8)
 
-    # ---------- Editor ----------
     def _load_into_editor(self, index: Optional[int]):
         self.selected_index = index
         for w in self.steps_frame.winfo_children():
@@ -524,135 +508,106 @@ class App(ctk.CTk):
             self.lbl_title.configure(text="Editor")
             return
 
-        g = self.guides[index]
-        self.lbl_title.configure(text=f"Editor — {g.name}")
+        m = self.macros[index]
+        self.lbl_title.configure(text=f"Editor — {m.name}")
 
         self.entry_name.delete(0, "end")
-        self.entry_name.insert(0, g.name)
+        self.entry_name.insert(0, m.name)
 
         self.entry_type.delete(0, "end")
-        self.entry_type.insert(0, g.type)
+        self.entry_type.insert(0, m.type)
 
-        self.opt_trigger.set(g.trigger if g.trigger in TRIGGERS else "—")
-        if g.enabled:
+        self.opt_trigger.set(m.trigger if m.trigger in TRIGGERS else "—")
+        if m.enabled:
             self.switch_enabled.select()
         else:
             self.switch_enabled.deselect()
 
-        ctk.CTkLabel(self.steps_frame, text=g.description, justify="left", wraplength=620).pack(
+        ctk.CTkLabel(self.steps_frame, text=m.description, justify="left", wraplength=650).pack(
             fill="x", padx=12, pady=(10, 8)
         )
 
-        for s in (g.steps or []):
-            if s.type == "wait":
-                line = f"⏱ wait {s.seconds:.2f}s"
-            elif s.type == "expect":
-                line = f"👉 {s.text}  ·  expect: {s.expect}"
-            else:
-                line = f"ℹ {s.text}"
-            ctk.CTkLabel(self.steps_frame, text=line, anchor="w", justify="left", wraplength=620).pack(
-                fill="x", padx=12, pady=6
+        for i, fr in enumerate(m.frames or []):
+            pretty = ", ".join([f"{k}={v}" for k, v in fr.inputs.items()])
+            line = f"{i+1:02d}. dt={fr.dt_ms}ms  |  {pretty}"
+            ctk.CTkLabel(self.steps_frame, text=line, anchor="w", justify="left", wraplength=650).pack(
+                fill="x", padx=12, pady=4
             )
 
     def _save_current(self):
-        g = self._get_current()
-        if not g:
+        m = self._get_current()
+        if not m:
             return
-        g.name = self.entry_name.get().strip() or g.name
-        g.type = self.entry_type.get().strip() or g.type
+
+        m.name = self.entry_name.get().strip() or m.name
+        m.type = self.entry_type.get().strip() or m.type
 
         trig = self.opt_trigger.get()
-        g.trigger = None if trig == "—" else trig
+        m.trigger = None if trig == "—" else trig
 
-        g.enabled = bool(self.switch_enabled.get())
+        m.enabled = bool(self.switch_enabled.get())
 
-        save_guides(self.data_path, self.guides)
+        save_macros(self.data_path, self.macros)
         self._refresh_list()
         self._set_status("Guardado en macros.json")
 
-    # ---------- Run ----------
     def _run_current(self):
-        g = self._get_current()
-        if not g:
+        m = self._get_current()
+        if not m:
             return
         if self.engine.is_running():
-            self._set_status("Ya hay una guía corriendo.")
+            self._set_status("Ya hay una macro corriendo.")
             return
-        self.engine.run(g)
+        self.engine.run(m)
 
     def _stop_run(self):
         self.engine.stop()
         self._set_status("Stop enviado.")
 
-    def _get_current(self) -> Optional[Guide]:
+    def _get_current(self) -> Optional[Macro]:
         if self.selected_index is None:
             return None
-        if self.selected_index < 0 or self.selected_index >= len(self.guides):
+        if self.selected_index < 0 or self.selected_index >= len(self.macros):
             return None
-        return self.guides[self.selected_index]
+        return self.macros[self.selected_index]
 
-    # ---------- Listening / triggers ----------
-    def _on_toggle_autostart(self):
-        self.auto_start_listening = bool(self.toggle_autostart.get())
-
-    def _poll_gamepad_triggers(self):
-        # Estado mando
-        if self.gamepad.ready:
-            buttons, _axes = self.gamepad.snapshot()
-            self.pad_status.configure(text=f"Mando: OK · Botones: {', '.join(sorted(buttons)) or '—'}")
-        else:
-            self.pad_status.configure(text="Mando: NO detectado (conéctalo y reinicia)")
-
-        # Master toggle: doble BACK
-        if self.gamepad.ready:
-            buttons, _ = self.gamepad.snapshot()
-            now = time.time()
-            if "BACK" in buttons:
-                # debounce simple
-                if now - self._last_back_press > 0.25:
-                    # si fue "rápido" -> doble pulsación
-                    if now - self._last_back_press < 0.60:
-                        self.listening_enabled = not self.listening_enabled
-                        self.badge_listen.configure(text=f"Listening: {'ON' if self.listening_enabled else 'OFF'}")
-                        self._set_status(f"Listening {'activado' if self.listening_enabled else 'desactivado'}")
-                    self._last_back_press = now
-
-            # Auto-start guides por trigger
-            if self.auto_start_listening and self.listening_enabled and not self.engine.is_running():
-                for g in self.guides:
-                    if g.enabled and g.trigger and g.trigger in buttons:
-                        self.engine.run(g)
-                        break
-
-        self.after(80, self._poll_gamepad_triggers)
-
-    # ---------- Keyboard (opcional) ----------
-    def _start_keyboard_listener(self):
-        # Te permite, si quieres, usar teclas del PC para Start/Stop de la app (no del juego)
-        def on_press(key):
-            try:
-                if key == keyboard.Key.f8:
-                    # toggle listening
-                    self.listening_enabled = not self.listening_enabled
-                    self.badge_listen.configure(text=f"Listening: {'ON' if self.listening_enabled else 'OFF'}")
-                    self._set_status(f"Listening {'activado' if self.listening_enabled else 'desactivado'}")
-                if key == keyboard.Key.f9:
-                    self._run_current()
-                if key == keyboard.Key.f10:
-                    self._stop_run()
-            except Exception:
-                pass
-
-        self._hotkey_listener = keyboard.Listener(on_press=on_press)
-        self._hotkey_listener.daemon = True
-        self._hotkey_listener.start()
-
-    # ---------- Status helpers ----------
     def _set_status(self, msg: str):
         self.status.configure(text=msg)
 
     def _set_status_threadsafe(self, msg: str):
         self.after(0, lambda: self._set_status(msg))
+
+    def _on_toggle_autostart(self):
+        self.auto_start = bool(self.toggle_autostart.get())
+
+    def _poll_gamepad(self):
+        if self.gamepad.ready:
+            buttons = self.gamepad.snapshot()
+            self.pad_status.configure(text=f"UDP → {UDP_HOST}:{UDP_PORT} · Mando: OK · {', '.join(sorted(buttons)) or '—'}")
+
+            now = time.time()
+            just_pressed = buttons - self._last_buttons
+
+            # doble BACK → toggle listening
+            if "BACK" in just_pressed:
+                if now - self._last_back_time < 0.6:
+                    self.listening = not self.listening
+                    self.badge_listen.configure(text=f"Listening: {'ON' if self.listening else 'OFF'}")
+                    self._set_status(f"Listening {'activado' if self.listening else 'desactivado'}")
+                self._last_back_time = now
+
+            # auto-start macros por trigger (solo en just_pressed)
+            if self.auto_start and self.listening and (not self.engine.is_running()):
+                for m in self.macros:
+                    if m.enabled and m.trigger and (m.trigger in just_pressed):
+                        self.engine.run(m)
+                        break
+
+            self._last_buttons = buttons
+        else:
+            self.pad_status.configure(text=f"UDP → {UDP_HOST}:{UDP_PORT} · Mando: NO detectado")
+
+        self.after(60, self._poll_gamepad)
 
 
 if __name__ == "__main__":
