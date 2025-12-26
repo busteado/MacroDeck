@@ -18,11 +18,15 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install customtkinter pynput pyinstaller
+          pip install customtkinter pygame pynput pyinstaller
 
-      - name: Build exe
+      - name: Build exe (with pygame bundled)
         run: |
-          pyinstaller --onefile --windowed --name MacroDeck macro_app.py
+          pyinstaller --noconfirm --clean --onefile --windowed --name MacroDeck ^
+            --collect-all pygame ^
+            --collect-all customtkinter ^
+            --collect-submodules pynput ^
+            macro_app.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
