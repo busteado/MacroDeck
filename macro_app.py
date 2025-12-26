@@ -1,189 +1,40 @@
 import json
-import time
-import threading
-import socket
 from dataclasses import dataclass, asdict
-from typing import List, Optional, Dict, Callable, Tuple, Any
+from typing import Any, Dict, List, Optional
 
 import customtkinter as ctk
-import pygame
+
+# ----------------------------
+# Data model
+# ----------------------------
+AXES = ["throttle", "steer", "pitch", "yaw", "roll"]
+BUTTONS = ["jump", "boost", "handbrake", "airRollL", "airRollR"]
 
 
-# ============================
-# Config conexión con tu juego
-# ============================
-UDP_HOST = "127.0.0.1"
-UDP_PORT = 28015  # cambia si quieres
+def _clamp_float(x: float, lo: float = -1.0, hi: float = 1.0) -> float:
+    return max(lo, min(hi, x))
 
 
-# ============================
-# Modelo de datos (MACRO INPUT)
-# ============================
 @dataclass
 class MacroFrame:
     dt_ms: int
-    inputs: Dict[str, Any]  # throttle/steer/pitch/yaw/roll/jump/boost/handbrake/airRollL/airRollR...
+    inputs: Dict[str, Any]
 
 
 @dataclass
 class Macro:
     name: str
-    type: str  # "Single-Stage" | "Multi-Stage"
-    description: str
+    type: str = "Single-Stage"   # Single-Stage | Multi-Stage
+    description: str = ""
     trigger: Optional[str] = None
     enabled: bool = True
     frames: List[MacroFrame] = None
 
 
-# ============================
-# Biblioteca por defecto (las de tu imagen)
-# Timings orientativos: ajusta a tu física/binds.
-# ============================
-def default_macros() -> List[Macro]:
-    def F(dt, **inp):
-        return MacroFrame(dt_ms=int(dt), inputs=inp)
-
-    return [
-        Macro(
-            name="Half Flip",
-            type="Single-Stage",
-            description="Half-flip: salto, backflip, cancel, air roll para enderezar.",
-            frames=[
-                F(80, jump=True), F(40, jump=False),
-                F(60, pitch=1.0, jump=True), F(30, jump=False, pitch=1.0),
-                F(140, pitch=-1.0),
-                F(220, airRollL=True, pitch=-0.2),
-                F(100, airRollL=False, pitch=0.0),
-            ],
-        ),
-        Macro(
-            name="Musty (2-Stage)",
-            type="Multi-Stage",
-            description="Musty: pop + pitch back + flick (2 saltos).",
-            frames=[
-                F(70, jump=True), F(40, jump=False),
-                F(260, pitch=1.0),
-                F(70, jump=True, pitch=-1.0), F(40, jump=False, pitch=-1.0),
-                F(160, pitch=-0.2),
-            ],
-        ),
-        Macro(
-            name="Stall (Left side)",
-            type="Single-Stage",
-            description="Stall izquierda (orientativo): yaw/roll + jump breve.",
-            frames=[
-                F(60, yaw=-1.0, roll=-1.0),
-                F(45, yaw=-1.0, roll=-1.0, jump=True),
-                F(35, jump=False, yaw=0.0, roll=0.0),
-            ],
-        ),
-        Macro(
-            name="Stall (Right side)",
-            type="Single-Stage",
-            description="Stall derecha (orientativo): yaw/roll + jump breve.",
-            frames=[
-                F(60, yaw=1.0, roll=1.0),
-                F(45, yaw=1.0, roll=1.0, jump=True),
-                F(35, jump=False, yaw=0.0, roll=0.0),
-            ],
-        ),
-        Macro(
-            name="Speed Flip Right",
-            type="Single-Stage",
-            description="Speedflip derecha: boost + salto + diagonal + cancel.",
-            frames=[
-                F(200, throttle=1.0, boost=True),
-                F(70, jump=True), F(40, jump=False),
-                F(65, jump=True, pitch=-1.0, yaw=0.55), F(35, jump=False, pitch=-1.0, yaw=0.55),
-                F(140, pitch=1.0, yaw=-0.15),
-                F(300, throttle=1.0, boost=True),
-            ],
-        ),
-        Macro(
-            name="Speed Flip Left",
-            type="Single-Stage",
-            description="Speedflip izquierda: boost + salto + diagonal + cancel.",
-            frames=[
-                F(200, throttle=1.0, boost=True),
-                F(70, jump=True), F(40, jump=False),
-                F(65, jump=True, pitch=-1.0, yaw=-0.55), F(35, jump=False, pitch=-1.0, yaw=-0.55),
-                F(140, pitch=1.0, yaw=0.15),
-                F(300, throttle=1.0, boost=True),
-            ],
-        ),
-        Macro(
-            name="Wall Dash Right",
-            type="Single-Stage",
-            description="Wall dash derecha (patrón). Repite si quieres más duración.",
-            frames=[
-                F(120, throttle=1.0, boost=True),
-                F(60, jump=True, steer=0.35), F(40, jump=False, steer=0.35),
-                F(90, steer=0.35, boost=True),
-                F(60, jump=True, steer=0.35), F(40, jump=False, steer=0.35),
-            ],
-        ),
-        Macro(
-            name="Wall Dash Left",
-            type="Single-Stage",
-            description="Wall dash izquierda (patrón). Repite si quieres más duración.",
-            frames=[
-                F(120, throttle=1.0, boost=True),
-                F(60, jump=True, steer=-0.35), F(40, jump=False, steer=-0.35),
-                F(90, steer=-0.35, boost=True),
-                F(60, jump=True, steer=-0.35), F(40, jump=False, steer=-0.35),
-            ],
-        ),
-        Macro(
-            name="Wave Dash",
-            type="Single-Stage",
-            description="Wave dash: pequeño salto + dash al tocar suelo.",
-            frames=[
-                F(70, jump=True), F(50, jump=False),
-                F(170, pitch=-0.6),
-                F(55, pitch=-0.9, jump=True), F(40, jump=False, pitch=-0.3),
-            ],
-        ),
-        Macro(
-            name="Kuxir Pinch Setup",
-            type="Single-Stage",
-            description="Setup pinch: velocidad + salto + air roll para orientar.",
-            frames=[
-                F(160, throttle=1.0, boost=True),
-                F(70, jump=True), F(40, jump=False),
-                F(260, airRollR=True, yaw=0.35, pitch=-0.25),
-                F(120, airRollR=False),
-            ],
-        ),
-        Macro(
-            name="Breezi Flick (2-Stage)",
-            type="Multi-Stage",
-            description="Breezi simplificado: pop + rotación + flick.",
-            frames=[
-                F(70, jump=True), F(40, jump=False),
-                F(420, airRollL=True, yaw=-0.55, pitch=0.35),
-                F(70, jump=True, pitch=-1.0), F(40, jump=False, pitch=-1.0),
-                F(140, pitch=-0.35),
-            ],
-        ),
-        Macro(
-            name="Mawkzy Flick (2-Stage)",
-            type="Multi-Stage",
-            description="Mawkzy (base): pop + micro ajuste + flick rápido.",
-            frames=[
-                F(70, jump=True), F(40, jump=False),
-                F(180, pitch=0.55),
-                F(120, pitch=0.0, yaw=0.25),
-                F(70, jump=True, pitch=-1.0, yaw=0.25), F(40, jump=False, pitch=-1.0, yaw=0.25),
-                F(150, pitch=-0.25),
-            ],
-        ),
-    ]
-
-
-# ============================
-# Persistencia
-# ============================
-def save_macros(path: str, macros: List[Macro]):
+# ----------------------------
+# Persistence
+# ----------------------------
+def save_macros(path: str, macros: List[Macro]) -> None:
     payload = []
     for m in macros:
         payload.append({
@@ -204,7 +55,12 @@ def load_macros(path: str) -> List[Macro]:
             payload = json.load(f)
         out: List[Macro] = []
         for item in payload:
-            frames = [MacroFrame(**fr) for fr in item.get("frames", [])]
+            frames = []
+            for fr in item.get("frames", []):
+                frames.append(MacroFrame(
+                    dt_ms=int(fr.get("dt_ms", 80)),
+                    inputs=dict(fr.get("inputs", {})),
+                ))
             out.append(Macro(
                 name=item.get("name", "Macro"),
                 type=item.get("type", "Single-Stage"),
@@ -220,221 +76,235 @@ def load_macros(path: str) -> List[Macro]:
         return []
 
 
-# ============================
-# Lectura de mando (pygame)
-# ============================
-class GamepadReader:
-    def __init__(self):
-        self.ready = False
-        self.joy: Optional[pygame.joystick.Joystick] = None
-        self._lock = threading.Lock()
-        self._buttons: set[str] = set()
-        self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
-
-        self.btn_map: Dict[str, int] = {
-            "A": 0, "B": 1, "X": 2, "Y": 3,
-            "LB": 4, "RB": 5,
-            "BACK": 6, "START": 7,
-            "LSTICK": 8, "RSTICK": 9,
-        }
-        self.trigger_threshold = 0.55
-
-    def start(self):
-        pygame.init()
-        pygame.joystick.init()
-        if pygame.joystick.get_count() <= 0:
-            self.ready = False
-            return
-        self.joy = pygame.joystick.Joystick(0)
-        self.joy.init()
-        self.ready = True
-
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
-
-    def snapshot(self) -> set[str]:
-        with self._lock:
-            return set(self._buttons)
-
-    def _loop(self):
-        while not self._stop.is_set():
-            pygame.event.pump()
-            if not self.joy:
-                time.sleep(0.03)
-                continue
-
-            buttons = set()
-
-            for name, idx in self.btn_map.items():
-                try:
-                    if self.joy.get_button(idx):
-                        buttons.add(name)
-                except Exception:
-                    pass
-
-            # triggers por ejes (heurística)
-            rt = False
-            lt = False
-            for ax in [2, 3, 4, 5]:
-                try:
-                    v = float(self.joy.get_axis(ax))
-                except Exception:
-                    continue
-                if v > self.trigger_threshold:
-                    rt = True
-                if v < -self.trigger_threshold:
-                    lt = True
-            if rt:
-                buttons.add("RT")
-            if lt:
-                buttons.add("LT")
-
-            with self._lock:
-                self._buttons = buttons
-
-            time.sleep(0.02)
+# ----------------------------
+# Helpers
+# ----------------------------
+def frame_to_F_line(fr: MacroFrame) -> str:
+    parts = [f"F({int(fr.dt_ms)}"]
+    # floats first
+    for k in AXES:
+        if k in fr.inputs:
+            parts.append(f"{k}={float(fr.inputs[k]):.3f}")
+    # bools
+    for k in BUTTONS:
+        if k in fr.inputs:
+            parts.append(f"{k}={bool(fr.inputs[k])}")
+    # any extras
+    for k, v in fr.inputs.items():
+        if k in AXES or k in BUTTONS:
+            continue
+        parts.append(f"{k}={repr(v)}")
+    return ", ".join(parts) + ")"
 
 
-# ============================
-# Engine: envía frames a tu juego por UDP
-# ============================
-class MacroNetEngine:
-    def __init__(self, status_cb: Callable[[str], None], host: str, port: int):
-        self.status_cb = status_cb
-        self.host = host
-        self.port = port
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
-
-    def is_running(self) -> bool:
-        return self._thread is not None and self._thread.is_alive()
-
-    def stop(self):
-        self._stop.set()
-
-    def run(self, macro: Macro):
-        if self.is_running():
-            return
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._run_blocking, args=(macro,), daemon=True)
-        self._thread.start()
-
-    def _send(self, payload: dict):
-        try:
-            data = json.dumps(payload).encode("utf-8")
-            self._sock.sendto(data, (self.host, self.port))
-        except Exception:
-            pass
-
-    def _run_blocking(self, macro: Macro):
-        self.status_cb(f"▶ Macro: {macro.name} → UDP {self.host}:{self.port}")
-
-        # start
-        self._send({"type": "macro_start", "name": macro.name, "t": time.time()})
-
-        for fr in (macro.frames or []):
-            if self._stop.is_set():
-                break
-
-            # manda input frame
-            self._send({
-                "type": "macro_frame",
-                "name": macro.name,
-                "dt_ms": fr.dt_ms,
-                "inputs": fr.inputs,
-                "t": time.time()
-            })
-
-            time.sleep(max(0.0, fr.dt_ms / 1000.0))
-
-        # end + reset (inputs neutros)
-        self._send({"type": "macro_end", "name": macro.name, "t": time.time()})
-        self._send({"type": "macro_reset", "inputs": {
-            "throttle": 0.0, "steer": 0.0, "pitch": 0.0, "yaw": 0.0, "roll": 0.0,
-            "jump": False, "boost": False, "handbrake": False, "airRollL": False, "airRollR": False
-        }, "t": time.time()})
-
-        self.status_cb("✅ Fin." if not self._stop.is_set() else "⏹ Stop.")
+def macro_to_snippet(m: Macro) -> str:
+    lines = []
+    lines.append(f"# {m.name} ({m.type})")
+    if m.description:
+        lines.append(f"# {m.description}")
+    lines.append("frames = [")
+    for fr in (m.frames or []):
+        lines.append(f"    {frame_to_F_line(fr)},")
+    lines.append("]")
+    return "\n".join(lines)
 
 
-# ============================
+def new_empty_frame() -> MacroFrame:
+    return MacroFrame(dt_ms=80, inputs={
+        "throttle": 0.0,
+        "steer": 0.0,
+        "pitch": 0.0,
+        "yaw": 0.0,
+        "roll": 0.0,
+        "jump": False,
+        "boost": False,
+        "handbrake": False,
+        "airRollL": False,
+        "airRollR": False,
+    })
+
+
+# ----------------------------
 # UI
-# ============================
+# ----------------------------
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
-TRIGGERS = ["—", "A", "B", "X", "Y", "LB", "RB", "LT", "RT", "START", "BACK", "LSTICK", "RSTICK"]
+
+class FrameEditor(ctk.CTkToplevel):
+    """Popup editor for one MacroFrame."""
+    def __init__(self, master, frame: MacroFrame, on_apply):
+        super().__init__(master)
+        self.title("Editar frame")
+        self.geometry("520x520")
+        self.resizable(False, False)
+
+        self.frame_obj = frame
+        self.on_apply = on_apply
+
+        container = ctk.CTkFrame(self, corner_radius=16)
+        container.pack(fill="both", expand=True, padx=14, pady=14)
+        container.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(container, text="Duración (ms)", font=ctk.CTkFont(weight="bold")).grid(
+            row=0, column=0, padx=12, pady=(12, 8), sticky="w"
+        )
+        self.dt_entry = ctk.CTkEntry(container)
+        self.dt_entry.grid(row=0, column=1, padx=12, pady=(12, 8), sticky="ew")
+        self.dt_entry.insert(0, str(frame.dt_ms))
+
+        # Axes
+        ctk.CTkLabel(container, text="Ejes (-1..1)", font=ctk.CTkFont(weight="bold")).grid(
+            row=1, column=0, padx=12, pady=(12, 6), sticky="w"
+        )
+
+        self.axis_entries: Dict[str, ctk.CTkEntry] = {}
+        r = 2
+        for k in AXES:
+            ctk.CTkLabel(container, text=k).grid(row=r, column=0, padx=12, pady=6, sticky="w")
+            e = ctk.CTkEntry(container)
+            e.grid(row=r, column=1, padx=12, pady=6, sticky="ew")
+            e.insert(0, str(float(frame.inputs.get(k, 0.0))))
+            self.axis_entries[k] = e
+            r += 1
+
+        # Buttons
+        ctk.CTkLabel(container, text="Botones", font=ctk.CTkFont(weight="bold")).grid(
+            row=r, column=0, padx=12, pady=(14, 6), sticky="w"
+        )
+        r += 1
+
+        self.button_vars: Dict[str, ctk.BooleanVar] = {}
+        btn_grid = ctk.CTkFrame(container, fg_color="transparent")
+        btn_grid.grid(row=r, column=0, columnspan=2, padx=12, pady=(0, 6), sticky="ew")
+        btn_grid.grid_columnconfigure((0, 1), weight=1)
+
+        for i, k in enumerate(BUTTONS):
+            var = ctk.BooleanVar(value=bool(frame.inputs.get(k, False)))
+            self.button_vars[k] = var
+            sw = ctk.CTkSwitch(btn_grid, text=k, variable=var)
+            sw.grid(row=i // 2, column=i % 2, padx=8, pady=6, sticky="w")
+
+        r += 1
+
+        # Extras (JSON dict)
+        ctk.CTkLabel(container, text="Extras (JSON opcional)", font=ctk.CTkFont(weight="bold")).grid(
+            row=r, column=0, padx=12, pady=(14, 6), sticky="w"
+        )
+        r += 1
+
+        self.extras = ctk.CTkTextbox(container, height=110)
+        self.extras.grid(row=r, column=0, columnspan=2, padx=12, pady=(0, 12), sticky="nsew")
+
+        extras_dict = {
+            k: v for k, v in frame.inputs.items()
+            if k not in AXES and k not in BUTTONS
+        }
+        self.extras.insert("1.0", json.dumps(extras_dict, indent=2, ensure_ascii=False))
+
+        # Actions
+        actions = ctk.CTkFrame(container, corner_radius=14)
+        actions.grid(row=r+1, column=0, columnspan=2, padx=12, pady=(6, 12), sticky="ew")
+        actions.grid_columnconfigure((0, 1), weight=1)
+
+        ctk.CTkButton(actions, text="Cancelar", fg_color="#4A4A4A", hover_color="#3A3A3A",
+                      command=self.destroy).grid(row=0, column=0, padx=10, pady=12, sticky="ew")
+        ctk.CTkButton(actions, text="Aplicar", command=self._apply).grid(
+            row=0, column=1, padx=10, pady=12, sticky="ew"
+        )
+
+    def _apply(self):
+        # dt
+        try:
+            dt = int(float(self.dt_entry.get().strip()))
+        except ValueError:
+            dt = 80
+        dt = max(1, dt)
+
+        new_inputs: Dict[str, Any] = {}
+
+        # axes
+        for k, e in self.axis_entries.items():
+            try:
+                v = float(e.get().strip())
+            except ValueError:
+                v = 0.0
+            new_inputs[k] = _clamp_float(v)
+
+        # buttons
+        for k, var in self.button_vars.items():
+            new_inputs[k] = bool(var.get())
+
+        # extras
+        try:
+            extras_dict = json.loads(self.extras.get("1.0", "end").strip() or "{}")
+            if isinstance(extras_dict, dict):
+                for k, v in extras_dict.items():
+                    new_inputs[k] = v
+        except Exception:
+            pass
+
+        self.frame_obj.dt_ms = dt
+        self.frame_obj.inputs = new_inputs
+        self.on_apply()
+        self.destroy()
 
 
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("MacroDeck — Connected to Your Game (UDP)")
-        self.geometry("1040x640")
-        self.minsize(960, 580)
+        self.title("Macro Creator — Frames (F(dt, ...))")
+        self.geometry("1120x660")
+        self.minsize(980, 600)
 
         self.data_path = "macros.json"
-        self.macros: List[Macro] = load_macros(self.data_path) or default_macros()
-
-        self.gamepad = GamepadReader()
-        self.gamepad.start()
-
-        self.engine = MacroNetEngine(self._set_status_threadsafe, UDP_HOST, UDP_PORT)
-
-        self.auto_start = True
-        self.listening = True
-        self._last_back_time = 0.0
-        self._last_buttons = set()
+        self.macros: List[Macro] = load_macros(self.data_path)
+        if not self.macros:
+            self.macros = [Macro(name="Nueva macro", frames=[new_empty_frame()])]
 
         self.selected_index: Optional[int] = None
 
         self._build_ui()
         self._refresh_list()
-        self._load_into_editor(0 if self.macros else None)
-
-        self.after(60, self._poll_gamepad)
+        self._load_macro(0)
 
     def _build_ui(self):
         self.grid_columnconfigure(0, weight=0)
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
+        # Left panel
         left = ctk.CTkFrame(self, corner_radius=16)
         left.grid(row=0, column=0, padx=14, pady=14, sticky="nsw")
-        left.grid_rowconfigure(3, weight=1)
+        left.grid_rowconfigure(2, weight=1)
 
         ctk.CTkLabel(left, text="Macros", font=ctk.CTkFont(size=18, weight="bold")).grid(
             row=0, column=0, padx=14, pady=(14, 8), sticky="w"
         )
 
-        topbar = ctk.CTkFrame(left, fg_color="transparent")
-        topbar.grid(row=1, column=0, padx=14, pady=(0, 10), sticky="ew")
-        topbar.grid_columnconfigure((0, 1), weight=1)
+        btns = ctk.CTkFrame(left, fg_color="transparent")
+        btns.grid(row=1, column=0, padx=14, pady=(0, 10), sticky="ew")
+        btns.grid_columnconfigure((0, 1), weight=1)
 
-        self.toggle_autostart = ctk.CTkSwitch(topbar, text="Auto-Start Listening", command=self._on_toggle_autostart)
-        self.toggle_autostart.select()
-        self.toggle_autostart.grid(row=0, column=0, sticky="w")
+        ctk.CTkButton(btns, text="Nueva", command=self._new_macro).grid(
+            row=0, column=0, padx=(0, 8), sticky="ew"
+        )
+        ctk.CTkButton(btns, text="Borrar", fg_color="#B23B3B", hover_color="#8E2F2F",
+                      command=self._delete_macro).grid(
+            row=0, column=1, padx=(8, 0), sticky="ew"
+        )
 
-        self.badge_listen = ctk.CTkLabel(topbar, text="Listening: ON", corner_radius=8)
-        self.badge_listen.grid(row=0, column=1, sticky="e")
+        self.listbox = ctk.CTkScrollableFrame(left, width=320, corner_radius=16)
+        self.listbox.grid(row=2, column=0, padx=14, pady=(0, 14), sticky="nsew")
 
-        self.pad_status = ctk.CTkLabel(left, text=f"UDP → {UDP_HOST}:{UDP_PORT} · Mando: detectando…", corner_radius=8)
-        self.pad_status.grid(row=2, column=0, padx=14, pady=(0, 10), sticky="ew")
-
-        self.listbox = ctk.CTkScrollableFrame(left, width=340, corner_radius=16)
-        self.listbox.grid(row=3, column=0, padx=14, pady=(0, 14), sticky="nsew")
-
-        # Right
+        # Right panel
         right = ctk.CTkFrame(self, corner_radius=16)
         right.grid(row=0, column=1, padx=(0, 14), pady=14, sticky="nsew")
         right.grid_columnconfigure(0, weight=1)
         right.grid_rowconfigure(3, weight=1)
 
-        self.lbl_title = ctk.CTkLabel(right, text="Editor", font=ctk.CTkFont(size=18, weight="bold"))
-        self.lbl_title.grid(row=0, column=0, padx=18, pady=(16, 6), sticky="w")
+        self.lbl = ctk.CTkLabel(right, text="Editor", font=ctk.CTkFont(size=18, weight="bold"))
+        self.lbl.grid(row=0, column=0, padx=18, pady=(16, 6), sticky="w")
 
         form = ctk.CTkFrame(right, corner_radius=14)
         form.grid(row=1, column=0, padx=18, pady=(0, 10), sticky="ew")
@@ -448,68 +318,107 @@ class App(ctk.CTk):
         self.entry_type = ctk.CTkEntry(form)
         self.entry_type.grid(row=1, column=1, padx=12, pady=10, sticky="ew")
 
-        ctk.CTkLabel(form, text="Trigger (mando)").grid(row=2, column=0, padx=12, pady=10, sticky="w")
-        self.opt_trigger = ctk.CTkOptionMenu(form, values=TRIGGERS)
-        self.opt_trigger.grid(row=2, column=1, padx=12, pady=10, sticky="w")
+        ctk.CTkLabel(form, text="Descripción").grid(row=2, column=0, padx=12, pady=10, sticky="w")
+        self.entry_desc = ctk.CTkEntry(form)
+        self.entry_desc.grid(row=2, column=1, padx=12, pady=10, sticky="ew")
 
-        self.switch_enabled = ctk.CTkSwitch(form, text="Enabled")
-        self.switch_enabled.grid(row=2, column=1, padx=12, pady=10, sticky="e")
+        self.sw_enabled = ctk.CTkSwitch(form, text="Enabled")
+        self.sw_enabled.grid(row=3, column=1, padx=12, pady=(4, 10), sticky="e")
 
-        self.steps_frame = ctk.CTkScrollableFrame(right, corner_radius=16)
-        self.steps_frame.grid(row=2, column=0, padx=18, pady=(0, 10), sticky="nsew")
+        # Frames toolbar
+        frame_bar = ctk.CTkFrame(right, fg_color="transparent")
+        frame_bar.grid(row=2, column=0, padx=18, pady=(0, 10), sticky="ew")
+        frame_bar.grid_columnconfigure((0, 1, 2, 3), weight=1)
 
-        actions = ctk.CTkFrame(right, corner_radius=14)
-        actions.grid(row=4, column=0, padx=18, pady=(0, 14), sticky="ew")
+        ctk.CTkButton(frame_bar, text="Añadir frame", command=self._add_frame).grid(
+            row=0, column=0, padx=(0, 8), sticky="ew"
+        )
+        ctk.CTkButton(frame_bar, text="Duplicar frame", command=self._duplicate_frame).grid(
+            row=0, column=1, padx=8, sticky="ew"
+        )
+        ctk.CTkButton(frame_bar, text="Move Up", command=lambda: self._move_frame(-1)).grid(
+            row=0, column=2, padx=8, sticky="ew"
+        )
+        ctk.CTkButton(frame_bar, text="Move Down", command=lambda: self._move_frame(1)).grid(
+            row=0, column=3, padx=(8, 0), sticky="ew"
+        )
+
+        # Frames list
+        self.frames_view = ctk.CTkScrollableFrame(right, corner_radius=16)
+        self.frames_view.grid(row=3, column=0, padx=18, pady=(0, 10), sticky="nsew")
+
+        # Snippet + actions
+        bottom = ctk.CTkFrame(right, corner_radius=14)
+        bottom.grid(row=4, column=0, padx=18, pady=(0, 14), sticky="ew")
+        bottom.grid_columnconfigure(0, weight=1)
+
+        self.snip = ctk.CTkTextbox(bottom, height=140)
+        self.snip.grid(row=0, column=0, padx=12, pady=(12, 10), sticky="ew")
+
+        actions = ctk.CTkFrame(bottom, fg_color="transparent")
+        actions.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="ew")
         actions.grid_columnconfigure((0, 1, 2), weight=1)
 
-        ctk.CTkButton(actions, text="Guardar", command=self._save_current).grid(
-            row=0, column=0, padx=(0, 10), pady=12, sticky="ew"
+        ctk.CTkButton(actions, text="Guardar JSON", command=self._save).grid(
+            row=0, column=0, padx=(0, 8), sticky="ew"
         )
-        ctk.CTkButton(actions, text="Start", command=self._run_current).grid(
-            row=0, column=1, padx=10, pady=12, sticky="ew"
+        ctk.CTkButton(actions, text="Copiar snippet", command=self._copy_snippet).grid(
+            row=0, column=1, padx=8, sticky="ew"
         )
-        ctk.CTkButton(actions, text="Stop", fg_color="#B23B3B", hover_color="#8E2F2F", command=self._stop_run).grid(
-            row=0, column=2, padx=(10, 0), pady=12, sticky="ew"
+        ctk.CTkButton(actions, text="Exportar .py", command=self._export_py).grid(
+            row=0, column=2, padx=(8, 0), sticky="ew"
         )
 
         self.status = ctk.CTkLabel(right, text="Listo.", anchor="w")
         self.status.grid(row=5, column=0, padx=18, pady=(0, 10), sticky="ew")
 
-        hint = ctk.CTkLabel(
-            right,
-            text="Doble BACK = toggle Listening. Auto-Start ejecuta macro al pulsar su Trigger.",
-            text_color="#9AA4B2",
-            anchor="w",
-        )
-        hint.grid(row=6, column=0, padx=18, pady=(0, 12), sticky="ew")
+        # selection state
+        self.selected_frame_index: Optional[int] = None
 
+    # -------- Macros list (left)
     def _refresh_list(self):
         for w in self.listbox.winfo_children():
             w.destroy()
 
         for idx, m in enumerate(self.macros):
-            trigger = m.trigger or "—"
             enabled = "✓" if m.enabled else "✗"
+            nframes = len(m.frames or [])
             btn = ctk.CTkButton(
                 self.listbox,
-                text=f"{enabled}  {m.name}\nType: {m.type}   Trigger: {trigger}",
+                text=f"{enabled} {m.name}\nFrames: {nframes}",
                 anchor="w",
-                height=58,
-                command=lambda i=idx: self._load_into_editor(i),
+                height=56,
+                command=lambda i=idx: self._load_macro(i),
             )
             btn.pack(fill="x", padx=10, pady=8)
 
-    def _load_into_editor(self, index: Optional[int]):
-        self.selected_index = index
-        for w in self.steps_frame.winfo_children():
-            w.destroy()
+    def _new_macro(self):
+        self.macros.append(Macro(name="Nueva macro", frames=[new_empty_frame()]))
+        self._refresh_list()
+        self._load_macro(len(self.macros) - 1)
+        self._set_status("Macro creada.")
 
-        if index is None:
-            self.lbl_title.configure(text="Editor")
+    def _delete_macro(self):
+        if self.selected_index is None:
             return
+        self.macros.pop(self.selected_index)
+        self.selected_index = None
+        self._refresh_list()
+        if self.macros:
+            self._load_macro(0)
+        else:
+            self.macros = [Macro(name="Nueva macro", frames=[new_empty_frame()])]
+            self._load_macro(0)
+        self._save()
+        self._set_status("Macro borrada.")
 
-        m = self.macros[index]
-        self.lbl_title.configure(text=f"Editor — {m.name}")
+    # -------- Editor (right)
+    def _load_macro(self, idx: int):
+        self.selected_index = idx
+        self.selected_frame_index = None
+
+        m = self.macros[idx]
+        self.lbl.configure(text=f"Editor — {m.name}")
 
         self.entry_name.delete(0, "end")
         self.entry_name.insert(0, m.name)
@@ -517,54 +426,177 @@ class App(ctk.CTk):
         self.entry_type.delete(0, "end")
         self.entry_type.insert(0, m.type)
 
-        self.opt_trigger.set(m.trigger if m.trigger in TRIGGERS else "—")
+        self.entry_desc.delete(0, "end")
+        self.entry_desc.insert(0, m.description)
+
         if m.enabled:
-            self.switch_enabled.select()
+            self.sw_enabled.select()
         else:
-            self.switch_enabled.deselect()
+            self.sw_enabled.deselect()
 
-        ctk.CTkLabel(self.steps_frame, text=m.description, justify="left", wraplength=650).pack(
-            fill="x", padx=12, pady=(10, 8)
-        )
+        self._render_frames()
+        self._render_snippet()
 
-        for i, fr in enumerate(m.frames or []):
-            pretty = ", ".join([f"{k}={v}" for k, v in fr.inputs.items()])
-            line = f"{i+1:02d}. dt={fr.dt_ms}ms  |  {pretty}"
-            ctk.CTkLabel(self.steps_frame, text=line, anchor="w", justify="left", wraplength=650).pack(
-                fill="x", padx=12, pady=4
-            )
+    def _render_frames(self):
+        for w in self.frames_view.winfo_children():
+            w.destroy()
 
-    def _save_current(self):
-        m = self._get_current()
+        m = self._cur()
         if not m:
             return
 
+        if not m.frames:
+            ctk.CTkLabel(self.frames_view, text="No hay frames. Añade uno.").pack(padx=12, pady=12)
+            return
+
+        for i, fr in enumerate(m.frames):
+            row = ctk.CTkFrame(self.frames_view, corner_radius=14)
+            row.pack(fill="x", padx=10, pady=8)
+            row.grid_columnconfigure(1, weight=1)
+
+            badge = ctk.CTkLabel(row, text=f"{i+1}", width=30, font=ctk.CTkFont(weight="bold"))
+            badge.grid(row=0, column=0, padx=10, pady=10)
+
+            summary = ", ".join([f"{k}={fr.inputs.get(k)}" for k in list(fr.inputs.keys())[:6]])
+            txt = f"dt={fr.dt_ms}ms  |  {summary}" + (" ..." if len(fr.inputs) > 6 else "")
+            lab = ctk.CTkLabel(row, text=txt, anchor="w")
+            lab.grid(row=0, column=1, padx=10, pady=10, sticky="ew")
+
+            btn_edit = ctk.CTkButton(row, text="Editar", width=90,
+                                     command=lambda j=i: self._edit_frame(j))
+            btn_edit.grid(row=0, column=2, padx=8, pady=10)
+
+            btn_sel = ctk.CTkButton(row, text="Sel", width=60, fg_color="#4A4A4A", hover_color="#3A3A3A",
+                                    command=lambda j=i: self._select_frame(j))
+            btn_sel.grid(row=0, column=3, padx=8, pady=10)
+
+            btn_del = ctk.CTkButton(row, text="✕", width=46, fg_color="#B23B3B", hover_color="#8E2F2F",
+                                    command=lambda j=i: self._delete_frame(j))
+            btn_del.grid(row=0, column=4, padx=8, pady=10)
+
+    def _select_frame(self, idx: int):
+        self.selected_frame_index = idx
+        self._set_status(f"Frame seleccionado: {idx+1}")
+
+    def _edit_frame(self, idx: int):
+        m = self._cur()
+        if not m:
+            return
+
+        def on_apply():
+            self._render_frames()
+            self._render_snippet()
+            self._set_status("Frame actualizado.")
+
+        FrameEditor(self, m.frames[idx], on_apply)
+
+    def _delete_frame(self, idx: int):
+        m = self._cur()
+        if not m:
+            return
+        if idx < 0 or idx >= len(m.frames):
+            return
+        m.frames.pop(idx)
+        if self.selected_frame_index == idx:
+            self.selected_frame_index = None
+        self._render_frames()
+        self._render_snippet()
+        self._set_status("Frame eliminado.")
+
+    def _add_frame(self):
+        m = self._cur()
+        if not m:
+            return
+        m.frames.append(new_empty_frame())
+        self._render_frames()
+        self._render_snippet()
+        self._set_status("Frame añadido.")
+
+    def _duplicate_frame(self):
+        m = self._cur()
+        if not m:
+            return
+        idx = self.selected_frame_index
+        if idx is None:
+            self._set_status("Selecciona un frame con 'Sel' para duplicar.")
+            return
+        fr = m.frames[idx]
+        m.frames.insert(idx + 1, MacroFrame(dt_ms=fr.dt_ms, inputs=dict(fr.inputs)))
+        self._render_frames()
+        self._render_snippet()
+        self._set_status("Frame duplicado.")
+
+    def _move_frame(self, direction: int):
+        m = self._cur()
+        if not m:
+            return
+        idx = self.selected_frame_index
+        if idx is None:
+            self._set_status("Selecciona un frame con 'Sel' para mover.")
+            return
+        new_idx = idx + direction
+        if new_idx < 0 or new_idx >= len(m.frames):
+            return
+        m.frames[idx], m.frames[new_idx] = m.frames[new_idx], m.frames[idx]
+        self.selected_frame_index = new_idx
+        self._render_frames()
+        self._render_snippet()
+        self._set_status(f"Movido a posición {new_idx+1}.")
+
+    def _render_snippet(self):
+        m = self._cur()
+        if not m:
+            return
+
+        # sync header fields before render
         m.name = self.entry_name.get().strip() or m.name
         m.type = self.entry_type.get().strip() or m.type
+        m.description = self.entry_desc.get().strip() or m.description
+        m.enabled = bool(self.sw_enabled.get())
 
-        trig = self.opt_trigger.get()
-        m.trigger = None if trig == "—" else trig
+        self.snip.delete("1.0", "end")
+        self.snip.insert("1.0", macro_to_snippet(m))
 
-        m.enabled = bool(self.switch_enabled.get())
-
+    # -------- Save / export
+    def _save(self):
+        m = self._cur()
+        if m:
+            m.name = self.entry_name.get().strip() or m.name
+            m.type = self.entry_type.get().strip() or m.type
+            m.description = self.entry_desc.get().strip() or m.description
+            m.enabled = bool(self.sw_enabled.get())
         save_macros(self.data_path, self.macros)
         self._refresh_list()
+        self._render_snippet()
         self._set_status("Guardado en macros.json")
 
-    def _run_current(self):
-        m = self._get_current()
+    def _copy_snippet(self):
+        txt = self.snip.get("1.0", "end").strip()
+        self.clipboard_clear()
+        self.clipboard_append(txt)
+        self._set_status("Snippet copiado al portapapeles.")
+
+    def _export_py(self):
+        m = self._cur()
         if not m:
             return
-        if self.engine.is_running():
-            self._set_status("Ya hay una macro corriendo.")
-            return
-        self.engine.run(m)
+        code = [
+            "def F(dt, **inputs):",
+            "    return {'dt_ms': dt, 'inputs': inputs}",
+            "",
+            macro_to_snippet(m),
+            "",
+        ]
+        fname = f"{m.name.strip().replace(' ', '_') or 'macro'}.py"
+        try:
+            with open(fname, "w", encoding="utf-8") as f:
+                f.write("\n".join(code))
+            self._set_status(f"Exportado: {fname}")
+        except Exception as e:
+            self._set_status(f"Error exportando: {e}")
 
-    def _stop_run(self):
-        self.engine.stop()
-        self._set_status("Stop enviado.")
-
-    def _get_current(self) -> Optional[Macro]:
+    # -------- misc
+    def _cur(self) -> Optional[Macro]:
         if self.selected_index is None:
             return None
         if self.selected_index < 0 or self.selected_index >= len(self.macros):
@@ -573,41 +605,6 @@ class App(ctk.CTk):
 
     def _set_status(self, msg: str):
         self.status.configure(text=msg)
-
-    def _set_status_threadsafe(self, msg: str):
-        self.after(0, lambda: self._set_status(msg))
-
-    def _on_toggle_autostart(self):
-        self.auto_start = bool(self.toggle_autostart.get())
-
-    def _poll_gamepad(self):
-        if self.gamepad.ready:
-            buttons = self.gamepad.snapshot()
-            self.pad_status.configure(text=f"UDP → {UDP_HOST}:{UDP_PORT} · Mando: OK · {', '.join(sorted(buttons)) or '—'}")
-
-            now = time.time()
-            just_pressed = buttons - self._last_buttons
-
-            # doble BACK → toggle listening
-            if "BACK" in just_pressed:
-                if now - self._last_back_time < 0.6:
-                    self.listening = not self.listening
-                    self.badge_listen.configure(text=f"Listening: {'ON' if self.listening else 'OFF'}")
-                    self._set_status(f"Listening {'activado' if self.listening else 'desactivado'}")
-                self._last_back_time = now
-
-            # auto-start macros por trigger (solo en just_pressed)
-            if self.auto_start and self.listening and (not self.engine.is_running()):
-                for m in self.macros:
-                    if m.enabled and m.trigger and (m.trigger in just_pressed):
-                        self.engine.run(m)
-                        break
-
-            self._last_buttons = buttons
-        else:
-            self.pad_status.configure(text=f"UDP → {UDP_HOST}:{UDP_PORT} · Mando: NO detectado")
-
-        self.after(60, self._poll_gamepad)
 
 
 if __name__ == "__main__":
